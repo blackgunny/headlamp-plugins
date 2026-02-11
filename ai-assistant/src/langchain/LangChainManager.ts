@@ -141,6 +141,29 @@ export default class LangChainManager extends AIManager {
             model: sanitizedConfig.model,
             verbose: true,
           });
+        case 'local_openai': {
+          if (!sanitizedConfig.baseUrl) {
+            throw new Error('Base URL is required for OpenAI-compatible local models');
+          }
+          if (!sanitizedConfig.model) {
+            throw new Error('Model is required for OpenAI-compatible local models');
+          }
+
+          // Some OpenAI-compatible servers don't require an API key. The OpenAI client
+          // still expects a non-empty string, so fall back to a dummy value if empty.
+          const apiKey = sanitizedConfig.apiKey || 'dummy-key';
+
+          return new ChatOpenAI({
+            apiKey,
+            model: sanitizedConfig.model,
+            verbose: true,
+            configuration: {
+              // The underlying OpenAI client will append /chat/completions (or /v1/chat/completions)
+              // to this base URL.
+              baseURL: sanitizedConfig.baseUrl,
+            },
+          });
+        }
         case 'azure':
           if (
             !sanitizedConfig.apiKey ||
@@ -935,12 +958,6 @@ Format your response to make the errors prominent and actionable.`,
     };
 
     console.log('Assistant prompt created from response');
-
-    // Clean up history to prevent message order issues
-    const lastAssistantWithToolsIndex = this.findLastAssistantWithTools();
-    if (lastAssistantWithToolsIndex >= 0) {
-      this.history = this.history.slice(0, lastAssistantWithToolsIndex + 1);
-    }
 
     this.history.push(assistantPrompt);
     return assistantPrompt;

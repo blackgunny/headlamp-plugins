@@ -215,6 +215,37 @@ export const modelProviders: ModelProvider[] = [
     ],
     models: ['llama2', 'mistral', 'mixtral', 'phi3', 'gemma'],
   },
+  {
+    id: 'local_openai',
+    name: 'Local LLM',
+    icon: 'ai-providers:local',
+    description: 'Integration with locally hosted models that expose an OpenAI-compatible /chat/completions or /v1/chat/completions endpoint',
+    fields: [
+      {
+        name: 'apiKey',
+        label: 'API Key',
+        type: 'text',
+        required: false,
+        placeholder: 'Optional API key if your server requires one',
+      },
+      {
+        name: 'baseUrl',
+        label: 'Base URL',
+        type: 'text',
+        required: true,
+        placeholder: 'http://localhost:8000 or http://localhost:8000/v1',
+        description:
+          'The base URL of your OpenAI-compatible server. Do NOT include the /chat/completions path; it will be added automatically.',
+      },
+      {
+        name: 'model',
+        label: 'Model',
+        type: 'text',
+        required: true,
+        placeholder: 'gpt-4o-compatible-model-name',
+      },
+    ],
+  },
 ];
 
 // Function to get provider by ID
