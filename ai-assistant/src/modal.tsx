@@ -3,9 +3,9 @@ import { useClustersConf, useSelectedClusters } from '@kinvolk/headlamp-plugin/l
 import { getCluster, getClusterGroup } from '@kinvolk/headlamp-plugin/lib/Utils';
 import { Box, Button, Grid, Typography } from '@mui/material';
 import { isEqual } from 'lodash';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useHistory, useLocation } from 'react-router-dom';
-import AIManager, { Prompt } from './ai/manager';
+import AIManager, { Prompt, StreamingCallbacks } from './ai/manager';
 import {
   AIAssistantHeader,
   AIChatContent,
@@ -54,6 +54,9 @@ export default function AIPrompt(props: {
   const _pluginSetting = useGlobalState();
   const [promptHistory, setPromptHistory] = React.useState<Prompt[]>([]);
   const [suggestions, setSuggestions] = React.useState<string[]>([]);
+  // Streaming content state - for real-time token display
+  const [streamingContent, setStreamingContent] = React.useState<string>('');
+  const [isStreaming, setIsStreaming] = React.useState(false);
   const selectedClusters = useSelectedClusters();
   const clusters = useClustersConf() || {};
   const dynamicPrompts = useDynamicPrompts();
@@ -470,22 +473,81 @@ export default function AIPrompt(props: {
     }
 
     setLoading(true);
+    setStreamingContent('');
+    setIsStreaming(true);
+
+    // Add a placeholder for the streaming assistant message
+    const streamingPlaceholder: Prompt = {
+      role: 'assistant',
+      content: '',
+      isDisplayOnly: true, // Mark as display-only so it's not sent to LLM
+    };
+    setPromptHistory(prev => [...prev, streamingPlaceholder]);
+
     try {
-      const promptResponse = await aiManager.userSend(prompt);
-      if (promptResponse.error) {
-        // Clear the global API error since errors are now handled at the prompt level
+      // Check if streaming is supported
+      if (aiManager.userSendStreaming) {
+        const callbacks: StreamingCallbacks = {
+          onToken: (token: string) => {
+            setStreamingContent(prev => {
+              const newContent = prev + token;
+              // Update the last assistant message in history with streaming content
+              setPromptHistory(currentHistory => {
+                const lastIndex = currentHistory.length - 1;
+                if (lastIndex >= 0 && currentHistory[lastIndex].role === 'assistant') {
+                  const updated = [...currentHistory];
+                  updated[lastIndex] = {
+                    ...updated[lastIndex],
+                    content: newContent,
+                  };
+                  return updated;
+                }
+                return currentHistory;
+              });
+              return newContent;
+            });
+          },
+          onToolCall: (toolCall: any) => {
+            console.log('🔧 Tool call received:', toolCall);
+          },
+          onComplete: (response: Prompt) => {
+            console.log('✅ Streaming complete');
+            setIsStreaming(false);
+            setStreamingContent('');
+            // Parse suggestions from the final response
+            if (response.content) {
+              const { suggestions: parsedSuggestions } = parseSuggestionsFromResponse(response.content);
+              if (parsedSuggestions.length > 0) {
+                setSuggestions(parsedSuggestions);
+              }
+            }
+          },
+          onError: (error: Error) => {
+            console.error('❌ Streaming error:', error);
+            setIsStreaming(false);
+            setStreamingContent('');
+          },
+        };
+
+        await aiManager.userSendStreaming(prompt, callbacks);
         setApiError(null);
       } else {
-        // Clear any previous errors
-        setApiError(null);
+        // Fallback to non-streaming mode
+        const promptResponse = await aiManager.userSend(prompt);
+        if (promptResponse.error) {
+          setApiError(null);
+        } else {
+          setApiError(null);
+        }
       }
 
-      // Update history from AI manager - this will replace our immediate user message
-      // but should include the same user message plus the AI response
+      // Update history from AI manager
       setAiManager(aiManager);
       updateHistory();
     } catch (error) {
       console.error('Error analyzing resource:', error);
+      setIsStreaming(false);
+      setStreamingContent('');
 
       // Don't add error to history if it was an abort error (user stopped the request)
       if (error.name !== 'AbortError') {
@@ -506,6 +568,7 @@ export default function AIPrompt(props: {
       setApiError(null);
     } finally {
       setLoading(false);
+      setIsStreaming(false);
     }
   }
 
@@ -514,6 +577,8 @@ export default function AIPrompt(props: {
     if (aiManager && loading) {
       aiManager.abort();
       setLoading(false);
+      setIsStreaming(false);
+      setStreamingContent('');
     }
   };
 
@@ -749,6 +814,7 @@ export default function AIPrompt(props: {
             <AIChatContent
               history={memoizedHistory}
               isLoading={loading}
+              isStreaming={isStreaming}
               apiError={apiError}
               onOperationSuccess={handleOperationSuccess}
               onOperationFailure={handleOperationFailure}

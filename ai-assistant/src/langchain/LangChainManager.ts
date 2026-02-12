@@ -16,7 +16,7 @@ import { ChatMistralAI } from '@langchain/mistralai';
 import { ChatOllama } from '@langchain/ollama';
 import { AzureChatOpenAI, ChatOpenAI } from '@langchain/openai';
 import sanitizeHtml from 'sanitize-html';
-import AIManager, { Prompt } from '../ai/manager';
+import AIManager, { Prompt, StreamingCallbacks } from '../ai/manager';
 import { basePrompt } from '../ai/prompts';
 import { apiErrorPromptTemplate, toolFailurePromptTemplate } from './PromptTemplates';
 import { KubernetesToolContext, ToolManager } from './tools';
@@ -309,6 +309,395 @@ export default class LangChainManager extends AIManager {
     } catch (error) {
       return this.handleUserSendError(error);
     }
+  }
+
+  // Streaming version of userSend - streams tokens as they are generated
+  async userSendStreaming(message: string, callbacks: StreamingCallbacks): Promise<Prompt> {
+    const userPrompt: Prompt = { role: 'user', content: message };
+    this.history.push(userPrompt);
+
+    // Create abort controller for this request
+    this.currentAbortController = new AbortController();
+
+    try {
+      const modelToUse = this.boundModel || this.model;
+
+      // For models with tools, handle tool calls with streaming
+      if (this.boundModel) {
+        return await this.handleToolEnabledStreamingRequest(message, modelToUse, callbacks);
+      }
+
+      // For models without tools, use simple streaming
+      return await this.handleSimpleStreamingRequest(message, modelToUse, callbacks);
+    } catch (error) {
+      this.currentAbortController = null;
+      const errorPrompt = await this.handleUserSendError(error);
+      callbacks.onError?.(error);
+      return errorPrompt;
+    }
+  }
+
+  // Handle simple streaming request (no tools)
+  private async handleSimpleStreamingRequest(
+    message: string,
+    model: BaseChatModel,
+    callbacks: StreamingCallbacks
+  ): Promise<Prompt> {
+    const systemMessage = new SystemMessage(this.createSystemPrompt());
+    const chatHistory = this.prepareChatHistory();
+    const userMessage = new HumanMessage(message);
+    const messages = [systemMessage, ...chatHistory, userMessage];
+
+    let fullContent = '';
+
+    try {
+      const stream = await model.stream(messages, {
+        signal: this.currentAbortController?.signal,
+      });
+
+      for await (const chunk of stream) {
+        if (this.currentAbortController?.signal.aborted) {
+          break;
+        }
+
+        const token = this.extractTextContent(chunk.content);
+        if (token) {
+          fullContent += token;
+          callbacks.onToken?.(token);
+        }
+      }
+
+      this.currentAbortController = null;
+
+      const assistantPrompt: Prompt = {
+        role: 'assistant',
+        content: fullContent,
+      };
+      this.history.push(assistantPrompt);
+      callbacks.onComplete?.(assistantPrompt);
+      return assistantPrompt;
+    } catch (error) {
+      this.currentAbortController = null;
+      throw error;
+    }
+  }
+
+  // Handle streaming request for models with tools enabled
+  private async handleToolEnabledStreamingRequest(
+    message: string,
+    model: BaseChatModel,
+    callbacks: StreamingCallbacks
+  ): Promise<Prompt> {
+    const systemMessage = new SystemMessage(this.createSystemPrompt());
+    const chatHistory = this.prepareChatHistory();
+    const userMessage = new HumanMessage(message);
+    const messages = [systemMessage, ...chatHistory, userMessage];
+
+    const modelToUse = this.boundModel || model;
+    let fullContent = '';
+    let toolCalls: any[] = [];
+
+    try {
+      const stream = await modelToUse.stream(messages, {
+        signal: this.currentAbortController?.signal,
+      });
+
+      for await (const chunk of stream) {
+        if (this.currentAbortController?.signal.aborted) {
+          break;
+        }
+
+        // Handle text content
+        const token = this.extractTextContent(chunk.content);
+        if (token) {
+          fullContent += token;
+          callbacks.onToken?.(token);
+        }
+
+        // Handle tool calls - accumulate them
+        if (chunk.tool_calls?.length) {
+          for (const tc of chunk.tool_calls) {
+            // Find existing tool call or create new one
+            const existingIndex = toolCalls.findIndex(t => t.id === tc.id || t.index === tc.index);
+            if (existingIndex >= 0) {
+              // Merge with existing
+              const existing = toolCalls[existingIndex];
+              if (tc.name) existing.name = tc.name;
+              if (tc.args) {
+                if (typeof tc.args === 'string') {
+                  existing.argsString = (existing.argsString || '') + tc.args;
+                } else {
+                  existing.args = { ...existing.args, ...tc.args };
+                }
+              }
+            } else {
+              toolCalls.push({
+                id: tc.id,
+                name: tc.name,
+                args: typeof tc.args === 'object' ? tc.args : undefined,
+                argsString: typeof tc.args === 'string' ? tc.args : undefined,
+                index: tc.index,
+              });
+            }
+          }
+        }
+
+        // Handle tool_call_chunks (used by some providers like OpenAI)
+        if ((chunk as any).tool_call_chunks?.length) {
+          for (const tc of (chunk as any).tool_call_chunks) {
+            const existingIndex = toolCalls.findIndex(t => t.index === tc.index);
+            if (existingIndex >= 0) {
+              const existing = toolCalls[existingIndex];
+              if (tc.name) existing.name = tc.name;
+              if (tc.id) existing.id = tc.id;
+              if (tc.args) {
+                existing.argsString = (existing.argsString || '') + tc.args;
+              }
+            } else {
+              toolCalls.push({
+                id: tc.id,
+                name: tc.name,
+                argsString: tc.args || '',
+                index: tc.index,
+              });
+            }
+          }
+        }
+      }
+
+      this.currentAbortController = null;
+
+      // Parse accumulated tool call arguments
+      const parsedToolCalls = toolCalls.map(tc => {
+        let parsedArgs = tc.args || {};
+        if (tc.argsString) {
+          try {
+            parsedArgs = JSON.parse(tc.argsString);
+          } catch (e) {
+            console.warn('Failed to parse tool call args:', tc.argsString);
+          }
+        }
+        return {
+          id: tc.id || `tool-call-${Date.now()}-${Math.random()}`,
+          name: tc.name,
+          args: parsedArgs,
+        };
+      }).filter(tc => tc.name); // Filter out incomplete tool calls
+
+      // Handle tool calls if present
+      if (parsedToolCalls.length > 0) {
+        console.log('🔧 Streaming tool calls detected:', parsedToolCalls);
+
+        const formattedToolCalls = parsedToolCalls.map(tc => ({
+          type: 'function',
+          id: tc.id,
+          function: {
+            name: tc.name,
+            arguments: JSON.stringify(tc.args || {}),
+          },
+        }));
+
+        const assistantPrompt: Prompt = {
+          role: 'assistant',
+          content: fullContent,
+          toolCalls: formattedToolCalls,
+        };
+        this.history.push(assistantPrompt);
+
+        // Notify about tool calls
+        for (const tc of formattedToolCalls) {
+          callbacks.onToolCall?.(tc);
+        }
+
+        // Process tool calls
+        await this.processToolCalls(formattedToolCalls, assistantPrompt);
+
+        // Check if we should process follow-up
+        const toolResponses = this.history.filter(
+          prompt => prompt.role === 'tool' && formattedToolCalls.some(tc => tc.id === prompt.toolCallId)
+        );
+
+        const shouldProcessFollowUp = toolResponses.every(response => {
+          try {
+            const parsed = JSON.parse(response.content);
+            return parsed.shouldProcessFollowUp !== false;
+          } catch {
+            return true;
+          }
+        });
+
+        if (shouldProcessFollowUp) {
+          return await this.processToolResponsesStreaming(callbacks);
+        }
+
+        callbacks.onComplete?.(assistantPrompt);
+        return assistantPrompt;
+      }
+
+      // No tool calls - return the response
+      const assistantPrompt: Prompt = {
+        role: 'assistant',
+        content: fullContent,
+      };
+      this.history.push(assistantPrompt);
+      callbacks.onComplete?.(assistantPrompt);
+      return assistantPrompt;
+    } catch (error) {
+      this.currentAbortController = null;
+      throw error;
+    }
+  }
+
+  // Streaming version of processToolResponses
+  async processToolResponsesStreaming(callbacks: StreamingCallbacks): Promise<Prompt> {
+    if (!this.hasToolResponses()) {
+      const lastMessage = this.getLastAssistantMessage();
+      callbacks.onComplete?.(lastMessage);
+      return lastMessage;
+    }
+
+    this.validateToolCallAlignment();
+
+    try {
+      const messages = this.prepareMessagesForToolResponse();
+      const modelToUse = this.boundModel || this.model;
+
+      let fullContent = '';
+      let toolCalls: any[] = [];
+
+      const stream = await modelToUse.stream(messages, {
+        signal: this.currentAbortController?.signal,
+      });
+
+      for await (const chunk of stream) {
+        if (this.currentAbortController?.signal.aborted) {
+          break;
+        }
+
+        // Handle text content
+        const token = this.extractTextContent(chunk.content);
+        if (token) {
+          fullContent += token;
+          callbacks.onToken?.(token);
+        }
+
+        // Handle tool calls
+        if (chunk.tool_calls?.length) {
+          for (const tc of chunk.tool_calls) {
+            const existingIndex = toolCalls.findIndex(t => t.id === tc.id || t.index === tc.index);
+            if (existingIndex >= 0) {
+              const existing = toolCalls[existingIndex];
+              if (tc.name) existing.name = tc.name;
+              if (tc.args) {
+                if (typeof tc.args === 'string') {
+                  existing.argsString = (existing.argsString || '') + tc.args;
+                } else {
+                  existing.args = { ...existing.args, ...tc.args };
+                }
+              }
+            } else {
+              toolCalls.push({
+                id: tc.id,
+                name: tc.name,
+                args: typeof tc.args === 'object' ? tc.args : undefined,
+                argsString: typeof tc.args === 'string' ? tc.args : undefined,
+                index: tc.index,
+              });
+            }
+          }
+        }
+
+        // Handle tool_call_chunks
+        if ((chunk as any).tool_call_chunks?.length) {
+          for (const tc of (chunk as any).tool_call_chunks) {
+            const existingIndex = toolCalls.findIndex(t => t.index === tc.index);
+            if (existingIndex >= 0) {
+              const existing = toolCalls[existingIndex];
+              if (tc.name) existing.name = tc.name;
+              if (tc.id) existing.id = tc.id;
+              if (tc.args) {
+                existing.argsString = (existing.argsString || '') + tc.args;
+              }
+            } else {
+              toolCalls.push({
+                id: tc.id,
+                name: tc.name,
+                argsString: tc.args || '',
+                index: tc.index,
+              });
+            }
+          }
+        }
+      }
+
+      // Parse tool call arguments
+      const parsedToolCalls = toolCalls.map(tc => {
+        let parsedArgs = tc.args || {};
+        if (tc.argsString) {
+          try {
+            parsedArgs = JSON.parse(tc.argsString);
+          } catch (e) {
+            console.warn('Failed to parse tool call args:', tc.argsString);
+          }
+        }
+        return {
+          id: tc.id || `tool-call-${Date.now()}-${Math.random()}`,
+          name: tc.name,
+          args: parsedArgs,
+        };
+      }).filter(tc => tc.name);
+
+      // Analyze and correct kubectl suggestions
+      const correctedContent = await this.analyzeAndCorrectResponseContent(fullContent);
+
+      const assistantPrompt: Prompt = {
+        role: 'assistant',
+        content: correctedContent,
+        toolCalls: parsedToolCalls.length > 0 ? parsedToolCalls.map(tc => ({
+          id: tc.id,
+          type: 'function',
+          function: {
+            name: tc.name,
+            arguments: JSON.stringify(tc.args || {}),
+          },
+        })) : undefined,
+      };
+
+      this.history.push(assistantPrompt);
+      callbacks.onComplete?.(assistantPrompt);
+      return assistantPrompt;
+    } catch (error) {
+      console.error('Error during streaming tool response processing:', error);
+      const errorPrompt: Prompt = {
+        role: 'assistant',
+        content: `Sorry, there was an error processing the tool responses: ${error.message}`,
+        error: true,
+      };
+      this.history.push(errorPrompt);
+      callbacks.onError?.(error);
+      return errorPrompt;
+    }
+  }
+
+  // Helper to analyze and correct response content (non-async version for streaming)
+  private async analyzeAndCorrectResponseContent(content: string): Promise<string> {
+    const lowercaseContent = content.toLowerCase();
+    const hasKubectlSuggestion =
+      lowercaseContent.includes('kubectl') ||
+      lowercaseContent.includes('run the command') ||
+      lowercaseContent.includes('command line') ||
+      lowercaseContent.includes('terminal') ||
+      lowercaseContent.includes('shell');
+
+    if (hasKubectlSuggestion) {
+      this.history.push({
+        role: 'system',
+        content:
+          'REMINDER: Never suggest kubectl or command line tools. Always use the kubernetes_api_request tool or explain UI actions. The user is using a web dashboard and cannot access the command line.',
+      });
+    }
+
+    return content;
   }
 
   // Handle requests for local models (simplified)

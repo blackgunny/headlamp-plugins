@@ -7,6 +7,7 @@ import TextStreamContainer from '../../textstream';
 interface AIChatContentProps {
   history: Prompt[];
   isLoading: boolean;
+  isStreaming?: boolean;
   apiError: string | null;
   onOperationSuccess: (response: any) => void;
   onOperationFailure: (error: any, operationType: string, resourceInfo?: any) => void;
@@ -16,6 +17,7 @@ interface AIChatContentProps {
 export default function AIChatContent({
   history,
   isLoading,
+  isStreaming = false,
   apiError,
   onOperationSuccess,
   onOperationFailure,
@@ -52,6 +54,7 @@ export default function AIChatContent({
       <TextStreamContainer
         history={history}
         isLoading={isLoading}
+        isStreaming={isStreaming}
         apiError={apiError}
         onOperationSuccess={onOperationSuccess}
         onOperationFailure={onOperationFailure}

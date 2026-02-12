@@ -1,3 +1,12 @@
+// Streaming callback types for SSE-style streaming
+export type StreamingCallbacks = {
+  onToken?: (token: string) => void;
+  onReasoning?: (reasoning: string) => void;
+  onToolCall?: (toolCall: any) => void;
+  onComplete?: (response: Prompt) => void;
+  onError?: (error: Error) => void;
+};
+
 export type Prompt = {
   role: string;
   content: string;
@@ -35,8 +44,16 @@ export default abstract class AIManager {
   // Abstract method that must be implemented
   abstract userSend(message: string): Promise<Prompt>;
 
-  // Changed from protected to public to allow external calling
+  // Streaming version of userSend - optional implementation
+  userSendStreaming?(
+    message: string,
+    callbacks: StreamingCallbacks
+  ): Promise<Prompt>;
+
   abstract processToolResponses(): Promise<Prompt>;
+
+  // Streaming version of processToolResponses - optional implementation
+  processToolResponsesStreaming?(callbacks: StreamingCallbacks): Promise<Prompt>;
 
   // Abstract method to abort current request
   abstract abort(): void;

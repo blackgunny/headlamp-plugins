@@ -23,6 +23,7 @@ declare module '@mui/material/styles' {
 const TextStreamContainer = React.memo(function TextStreamContainer({
   history,
   isLoading,
+  isStreaming = false,
   apiError,
   onOperationSuccess,
   onOperationFailure,
@@ -30,6 +31,7 @@ const TextStreamContainer = React.memo(function TextStreamContainer({
 }: {
   history: Prompt[];
   isLoading: boolean;
+  isStreaming?: boolean;
   apiError: string | null;
   onOperationSuccess?: (response: any) => void;
   onOperationFailure?: (error: any, operationType: string, resourceInfo?: any) => void;
@@ -249,7 +251,8 @@ const TextStreamContainer = React.memo(function TextStreamContainer({
       const isJsonSuccess = prompt.success;
 
       if (prompt.content === '' && prompt.role === 'user') return null;
-      if (prompt.content === '' && prompt.role === 'assistant') return null;
+      // Allow empty assistant messages while streaming (to show the cursor)
+      if (prompt.content === '' && prompt.role === 'assistant' && !isStreaming) return null;
       return (
         <Box
           ref={history.length === index + 1 ? lastMessageRef : null}
@@ -303,6 +306,24 @@ const TextStreamContainer = React.memo(function TextStreamContainer({
                       content={prompt.content || ''}
                       onYamlDetected={memoizedOnYamlDetected}
                     />
+                    {/* Show streaming cursor for the last message while streaming */}
+                    {isStreaming && index === history.length - 1 && (
+                      <Box
+                        component="span"
+                        sx={{
+                          display: 'inline-block',
+                          width: '8px',
+                          height: '1em',
+                          backgroundColor: 'primary.main',
+                          marginLeft: '2px',
+                          animation: 'blink 1s step-end infinite',
+                          '@keyframes blink': {
+                            '0%, 100%': { opacity: 1 },
+                            '50%': { opacity: 0 },
+                          },
+                        }}
+                      />
+                    )}
                   </>
                 )}
               </>
@@ -311,7 +332,7 @@ const TextStreamContainer = React.memo(function TextStreamContainer({
         </Box>
       );
     },
-    [history.length, theme.palette, memoizedOnYamlDetected]
+    [history.length, theme.palette, memoizedOnYamlDetected, isStreaming]
   );
 
   return (
@@ -339,7 +360,8 @@ const TextStreamContainer = React.memo(function TextStreamContainer({
 
         {history.map((prompt, index) => renderMessage(prompt, index))}
 
-        {isLoading && (
+        {/* Show loading indicator only when loading but not streaming */}
+        {isLoading && !isStreaming && (
           <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', my: 2 }}>
             <CircularProgress size={24} sx={{ mr: 1 }} />
             <Typography>Processing your request...</Typography>
