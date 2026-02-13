@@ -98,6 +98,23 @@ LOG HANDLING FOR MULTI-CONTAINER PODS:
       throw new Error('Kubernetes tool context not configured');
     }
 
+    // Validate required parameters (prevents errors during streaming when parameters are incomplete)
+    if (!method || !url) {
+      return {
+        content: JSON.stringify({
+          error: true,
+          message: 'Incomplete tool call parameters. Waiting for complete request...',
+          toolName: 'kubernetes_api_request',
+          request: { url, method, body },
+        }),
+        shouldAddToHistory: false,
+        shouldProcessFollowUp: false,
+        metadata: {
+          incomplete: true,
+        },
+      };
+    }
+
     console.log(`Processing kubernetes_api_request tool: ${method} ${url}`, {
       hasContext: !!this.context,
       toolCallId,

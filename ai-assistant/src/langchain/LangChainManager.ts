@@ -864,7 +864,13 @@ export default class LangChainManager extends AIManager {
     const failedOperations: string[] = [];
 
     for (const toolCall of toolCalls) {
-      const args = JSON.parse(toolCall.function.arguments);
+      let args: Record<string, any> = {};
+      try {
+        args = JSON.parse(toolCall.function.arguments || '{}');
+      } catch (parseError) {
+        console.warn('Failed to parse tool arguments:', toolCall.function.arguments);
+        // Continue with empty args - ToolManager will handle validation
+      }
 
       try {
         // Execute the tool call using ToolManager

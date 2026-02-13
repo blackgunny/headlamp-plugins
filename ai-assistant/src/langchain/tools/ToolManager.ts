@@ -93,6 +93,29 @@ export class ToolManager {
         metadata: { error: 'tool_disabled', toolName },
       };
     }
+
+    // Validate required parameters for kubernetes_api_request tool
+    // This prevents errors during streaming when parameters are incomplete
+    if (toolName === 'kubernetes_api_request') {
+      if (!args || !args.method || !args.url) {
+        return {
+          content: JSON.stringify({
+            error: true,
+            message: 'Incomplete tool call parameters. Required: method and url.',
+            toolName: toolName,
+            request: args || {},
+          }),
+          shouldAddToHistory: false,
+          shouldProcessFollowUp: false,
+          metadata: {
+            incomplete: true,
+            toolName,
+            receivedArgs: args
+          },
+        };
+      }
+    }
+
     const tool = this.toolHandlers.get(toolName);
     if (!tool) {
       throw new Error(`Tool ${toolName} not found`);
