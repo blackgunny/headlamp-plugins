@@ -1,5 +1,5 @@
 import { Icon } from '@iconify/react';
-import { Alert, Box, CircularProgress, Fab, Typography } from '@mui/material';
+import { Accordion, AccordionDetails, AccordionSummary, Alert, Box, CircularProgress, Fab, Typography } from '@mui/material';
 import { useTheme } from '@mui/material';
 import { alpha } from '@mui/material/styles';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -346,6 +346,83 @@ const TextStreamContainer = React.memo(function TextStreamContainer({
                           },
                         }}
                       />
+                    )}
+                    {/* Reasoning Accordion - only show if reasoning exists */}
+                    {prompt.reasoning && (
+                      <Accordion
+                        disableGutters
+                        elevation={0}
+                        sx={{
+                          mt: 1.5,
+                          bgcolor: alpha(theme.palette.action.hover, 0.05),
+                          border: '1px solid',
+                          borderColor: 'divider',
+                          borderRadius: 1,
+                          '&:before': { display: 'none' },
+                          '& .MuiAccordionSummary-root': {
+                            minHeight: 36,
+                            px: 1.5,
+                            '&:hover': {
+                              bgcolor: alpha(theme.palette.action.hover, 0.1),
+                            },
+                          },
+                          '& .MuiAccordionSummary-content': {
+                            my: 0.5,
+                          },
+                        }}
+                      >
+                        <AccordionSummary
+                          expandIcon={<Icon icon="mdi:chevron-down" width="20px" />}
+                          aria-controls={`reasoning-content-${index}`}
+                          id={`reasoning-header-${index}`}
+                        >
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                            <Icon icon="mdi:brain" width="16px" />
+                            <Typography variant="caption" sx={{ fontWeight: 500 }}>
+                              추론 보기
+                            </Typography>
+                          </Box>
+                        </AccordionSummary>
+                        <AccordionDetails
+                          sx={{
+                            px: 1.5,
+                            py: 1,
+                            borderTop: '1px solid',
+                            borderColor: 'divider',
+                            bgcolor: alpha(theme.palette.background.default, 0.5),
+                          }}
+                        >
+                          <Typography
+                            variant="body2"
+                            sx={{
+                              whiteSpace: 'pre-wrap',
+                              color: 'text.secondary',
+                              fontSize: '0.85rem',
+                              lineHeight: 1.6,
+                            }}
+                          >
+                            {prompt.reasoning}
+                          </Typography>
+                          {/* Show streaming cursor for reasoning while streaming */}
+                          {isStreaming && index === history.length - 1 && !prompt.content && (
+                            <Box
+                              component="span"
+                              sx={{
+                                display: 'inline-block',
+                                width: '6px',
+                                height: '0.85em',
+                                backgroundColor: 'text.secondary',
+                                marginLeft: '2px',
+                                animation: 'blink 1s step-end infinite',
+                                '@keyframes blink': {
+                                  '0%, 100%': { opacity: 1 },
+                                  '50%': { opacity: 0 },
+                                },
+                              }}
+                            />
+                          )}
+                        </AccordionDetails>
+                      </Accordion>
                     )}
                   </>
                 )}

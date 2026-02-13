@@ -10,6 +10,7 @@ export type StreamingCallbacks = {
 export type Prompt = {
   role: string;
   content: string;
+  reasoning?: string; // <think>...</think> 태그 내 추론 내용
   toolCalls?: any[];
   toolCallId?: string;
   name?: string;

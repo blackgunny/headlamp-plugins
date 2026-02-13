@@ -21,6 +21,148 @@ import { basePrompt } from '../ai/prompts';
 import { apiErrorPromptTemplate, toolFailurePromptTemplate } from './PromptTemplates';
 import { KubernetesToolContext, ToolManager } from './tools';
 
+/**
+ * State machine for parsing <think>...</think> tags during streaming.
+ * Separates reasoning content from answer content.
+ */
+type ThinkTagState = 'ANSWER' | 'REASONING';
+
+class ThinkTagParser {
+  private state: ThinkTagState = 'ANSWER';
+  private buffer: string = '';
+  private reasoningContent: string = '';
+  private answerContent: string = '';
+
+  // Tags to detect
+  private readonly THINK_OPEN = '<think>';
+  private readonly THINK_CLOSE = '</think>';
+
+  /**
+   * Process incoming token and emit appropriate events.
+   * Returns { reasoning?: string, answer?: string } based on what was parsed.
+   */
+  processToken(token: string): { reasoning?: string; answer?: string } {
+    const result: { reasoning?: string; answer?: string } = {};
+
+    // Add token to buffer for tag detection
+    this.buffer += token;
+
+    // Process buffer character by character
+    while (this.buffer.length > 0) {
+      if (this.state === 'ANSWER') {
+        // Look for opening <think> tag
+        const thinkOpenIndex = this.buffer.indexOf(this.THINK_OPEN);
+
+        if (thinkOpenIndex === -1) {
+          // No opening tag found - check if we might be mid-tag
+          // Keep potential partial tag in buffer (max length of tag - 1)
+          const safeLength = Math.max(0, this.buffer.length - (this.THINK_OPEN.length - 1));
+          if (safeLength > 0) {
+            const answerChunk = this.buffer.slice(0, safeLength);
+            this.answerContent += answerChunk;
+            result.answer = (result.answer || '') + answerChunk;
+            this.buffer = this.buffer.slice(safeLength);
+          }
+          break;
+        } else if (thinkOpenIndex === 0) {
+          // Tag starts at beginning of buffer
+          if (this.buffer.length >= this.THINK_OPEN.length) {
+            // Complete tag found - switch to REASONING state
+            this.buffer = this.buffer.slice(this.THINK_OPEN.length);
+            this.state = 'REASONING';
+          } else {
+            // Partial tag at start - wait for more data
+            break;
+          }
+        } else {
+          // Tag found later in buffer - emit answer content before it
+          const answerChunk = this.buffer.slice(0, thinkOpenIndex);
+          this.answerContent += answerChunk;
+          result.answer = (result.answer || '') + answerChunk;
+          this.buffer = this.buffer.slice(thinkOpenIndex);
+        }
+      } else {
+        // REASONING state - look for closing </think> tag
+        const thinkCloseIndex = this.buffer.indexOf(this.THINK_CLOSE);
+
+        if (thinkCloseIndex === -1) {
+          // No closing tag found - check if we might be mid-tag
+          const safeLength = Math.max(0, this.buffer.length - (this.THINK_CLOSE.length - 1));
+          if (safeLength > 0) {
+            const reasoningChunk = this.buffer.slice(0, safeLength);
+            this.reasoningContent += reasoningChunk;
+            result.reasoning = (result.reasoning || '') + reasoningChunk;
+            this.buffer = this.buffer.slice(safeLength);
+          }
+          break;
+        } else if (thinkCloseIndex === 0) {
+          // Tag starts at beginning of buffer
+          if (this.buffer.length >= this.THINK_CLOSE.length) {
+            // Complete closing tag found - switch back to ANSWER state
+            this.buffer = this.buffer.slice(this.THINK_CLOSE.length);
+            this.state = 'ANSWER';
+          } else {
+            // Partial tag at start - wait for more data
+            break;
+          }
+        } else {
+          // Tag found later in buffer - emit reasoning content before it
+          const reasoningChunk = this.buffer.slice(0, thinkCloseIndex);
+          this.reasoningContent += reasoningChunk;
+          result.reasoning = (result.reasoning || '') + reasoningChunk;
+          this.buffer = this.buffer.slice(thinkCloseIndex);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Flush any remaining buffer content (call at end of stream).
+   */
+  flush(): { reasoning?: string; answer?: string } {
+    const result: { reasoning?: string; answer?: string } = {};
+
+    if (this.buffer.length > 0) {
+      if (this.state === 'ANSWER') {
+        this.answerContent += this.buffer;
+        result.answer = this.buffer;
+      } else {
+        this.reasoningContent += this.buffer;
+        result.reasoning = this.buffer;
+      }
+      this.buffer = '';
+    }
+
+    return result;
+  }
+
+  /**
+   * Get accumulated reasoning content.
+   */
+  getReasoning(): string {
+    return this.reasoningContent;
+  }
+
+  /**
+   * Get accumulated answer content.
+   */
+  getAnswer(): string {
+    return this.answerContent;
+  }
+
+  /**
+   * Reset the parser state.
+   */
+  reset(): void {
+    this.state = 'ANSWER';
+    this.buffer = '';
+    this.reasoningContent = '';
+    this.answerContent = '';
+  }
+}
+
 export default class LangChainManager extends AIManager {
   private model: BaseChatModel;
   private boundModel: BaseChatModel | null = null;
@@ -349,6 +491,10 @@ export default class LangChainManager extends AIManager {
     const messages = [systemMessage, ...chatHistory, userMessage];
 
     let fullContent = '';
+    let fullReasoning = '';
+
+    // Initialize think tag parser for streaming
+    const thinkTagParser = new ThinkTagParser();
 
     try {
       const stream = await model.stream(messages, {
@@ -362,16 +508,40 @@ export default class LangChainManager extends AIManager {
 
         const token = this.extractTextContent(chunk.content);
         if (token) {
-          fullContent += token;
-          callbacks.onToken?.(token);
+          // Process token through think tag parser
+          const parsed = thinkTagParser.processToken(token);
+
+          // Handle answer content
+          if (parsed.answer) {
+            fullContent += parsed.answer;
+            callbacks.onToken?.(parsed.answer);
+          }
+
+          // Handle reasoning content
+          if (parsed.reasoning) {
+            fullReasoning += parsed.reasoning;
+            callbacks.onReasoning?.(parsed.reasoning);
+          }
         }
       }
 
       this.currentAbortController = null;
 
+      // Flush any remaining buffer content
+      const flushed = thinkTagParser.flush();
+      if (flushed.answer) {
+        fullContent += flushed.answer;
+        callbacks.onToken?.(flushed.answer);
+      }
+      if (flushed.reasoning) {
+        fullReasoning += flushed.reasoning;
+        callbacks.onReasoning?.(flushed.reasoning);
+      }
+
       const assistantPrompt: Prompt = {
         role: 'assistant',
         content: fullContent,
+        reasoning: fullReasoning || undefined,
       };
       this.history.push(assistantPrompt);
       callbacks.onComplete?.(assistantPrompt);
@@ -395,7 +565,11 @@ export default class LangChainManager extends AIManager {
 
     const modelToUse = this.boundModel || model;
     let fullContent = '';
+    let fullReasoning = '';
     let toolCalls: any[] = [];
+
+    // Initialize think tag parser for streaming
+    const thinkTagParser = new ThinkTagParser();
 
     try {
       const stream = await modelToUse.stream(messages, {
@@ -410,8 +584,20 @@ export default class LangChainManager extends AIManager {
         // Handle text content
         const token = this.extractTextContent(chunk.content);
         if (token) {
-          fullContent += token;
-          callbacks.onToken?.(token);
+          // Process token through think tag parser
+          const parsed = thinkTagParser.processToken(token);
+
+          // Handle answer content
+          if (parsed.answer) {
+            fullContent += parsed.answer;
+            callbacks.onToken?.(parsed.answer);
+          }
+
+          // Handle reasoning content
+          if (parsed.reasoning) {
+            fullReasoning += parsed.reasoning;
+            callbacks.onReasoning?.(parsed.reasoning);
+          }
         }
 
         // Handle tool calls - accumulate them
@@ -467,6 +653,17 @@ export default class LangChainManager extends AIManager {
 
       this.currentAbortController = null;
 
+      // Flush any remaining buffer content
+      const flushed = thinkTagParser.flush();
+      if (flushed.answer) {
+        fullContent += flushed.answer;
+        callbacks.onToken?.(flushed.answer);
+      }
+      if (flushed.reasoning) {
+        fullReasoning += flushed.reasoning;
+        callbacks.onReasoning?.(flushed.reasoning);
+      }
+
       // Parse accumulated tool call arguments
       const parsedToolCalls = toolCalls.map(tc => {
         let parsedArgs = tc.args || {};
@@ -500,6 +697,7 @@ export default class LangChainManager extends AIManager {
         const assistantPrompt: Prompt = {
           role: 'assistant',
           content: fullContent,
+          reasoning: fullReasoning || undefined,
           toolCalls: formattedToolCalls,
         };
         this.history.push(assistantPrompt);
@@ -538,6 +736,7 @@ export default class LangChainManager extends AIManager {
       const assistantPrompt: Prompt = {
         role: 'assistant',
         content: fullContent,
+        reasoning: fullReasoning || undefined,
       };
       this.history.push(assistantPrompt);
       callbacks.onComplete?.(assistantPrompt);
@@ -563,7 +762,11 @@ export default class LangChainManager extends AIManager {
       const modelToUse = this.boundModel || this.model;
 
       let fullContent = '';
+      let fullReasoning = '';
       let toolCalls: any[] = [];
+
+      // Initialize think tag parser for streaming
+      const thinkTagParser = new ThinkTagParser();
 
       const stream = await modelToUse.stream(messages, {
         signal: this.currentAbortController?.signal,
@@ -577,8 +780,20 @@ export default class LangChainManager extends AIManager {
         // Handle text content
         const token = this.extractTextContent(chunk.content);
         if (token) {
-          fullContent += token;
-          callbacks.onToken?.(token);
+          // Process token through think tag parser
+          const parsed = thinkTagParser.processToken(token);
+
+          // Handle answer content
+          if (parsed.answer) {
+            fullContent += parsed.answer;
+            callbacks.onToken?.(parsed.answer);
+          }
+
+          // Handle reasoning content
+          if (parsed.reasoning) {
+            fullReasoning += parsed.reasoning;
+            callbacks.onReasoning?.(parsed.reasoning);
+          }
         }
 
         // Handle tool calls
@@ -630,6 +845,17 @@ export default class LangChainManager extends AIManager {
         }
       }
 
+      // Flush any remaining buffer content
+      const flushed = thinkTagParser.flush();
+      if (flushed.answer) {
+        fullContent += flushed.answer;
+        callbacks.onToken?.(flushed.answer);
+      }
+      if (flushed.reasoning) {
+        fullReasoning += flushed.reasoning;
+        callbacks.onReasoning?.(flushed.reasoning);
+      }
+
       // Parse tool call arguments
       const parsedToolCalls = toolCalls.map(tc => {
         let parsedArgs = tc.args || {};
@@ -653,6 +879,7 @@ export default class LangChainManager extends AIManager {
       const assistantPrompt: Prompt = {
         role: 'assistant',
         content: correctedContent,
+        reasoning: fullReasoning || undefined,
         toolCalls: parsedToolCalls.length > 0 ? parsedToolCalls.map(tc => ({
           id: tc.id,
           type: 'function',

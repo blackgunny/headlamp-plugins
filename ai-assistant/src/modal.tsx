@@ -56,6 +56,8 @@ export default function AIPrompt(props: {
   const [suggestions, setSuggestions] = React.useState<string[]>([]);
   // Streaming content state - for real-time token display
   const [streamingContent, setStreamingContent] = React.useState<string>('');
+  // Streaming reasoning content state - for <think> tag content
+  const [streamingReasoning, setStreamingReasoning] = React.useState<string>('');
   const [isStreaming, setIsStreaming] = React.useState(false);
   const selectedClusters = useSelectedClusters();
   const clusters = useClustersConf() || {};
@@ -474,12 +476,14 @@ export default function AIPrompt(props: {
 
     setLoading(true);
     setStreamingContent('');
+    setStreamingReasoning('');
     setIsStreaming(true);
 
     // Add a placeholder for the streaming assistant message
     const streamingPlaceholder: Prompt = {
       role: 'assistant',
       content: '',
+      reasoning: '',
       isDisplayOnly: true, // Mark as display-only so it's not sent to LLM
     };
     setPromptHistory(prev => [...prev, streamingPlaceholder]);
@@ -507,6 +511,25 @@ export default function AIPrompt(props: {
               return newContent;
             });
           },
+          onReasoning: (reasoning: string) => {
+            setStreamingReasoning(prev => {
+              const newReasoning = prev + reasoning;
+              // Update the last assistant message in history with reasoning content
+              setPromptHistory(currentHistory => {
+                const lastIndex = currentHistory.length - 1;
+                if (lastIndex >= 0 && currentHistory[lastIndex].role === 'assistant') {
+                  const updated = [...currentHistory];
+                  updated[lastIndex] = {
+                    ...updated[lastIndex],
+                    reasoning: newReasoning,
+                  };
+                  return updated;
+                }
+                return currentHistory;
+              });
+              return newReasoning;
+            });
+          },
           onToolCall: (toolCall: any) => {
             console.log('🔧 Tool call received:', toolCall);
           },
@@ -514,6 +537,7 @@ export default function AIPrompt(props: {
             console.log('✅ Streaming complete');
             setIsStreaming(false);
             setStreamingContent('');
+            setStreamingReasoning('');
             // Parse suggestions from the final response
             if (response.content) {
               const { suggestions: parsedSuggestions } = parseSuggestionsFromResponse(response.content);
@@ -526,6 +550,7 @@ export default function AIPrompt(props: {
             console.error('❌ Streaming error:', error);
             setIsStreaming(false);
             setStreamingContent('');
+            setStreamingReasoning('');
           },
         };
 
@@ -548,6 +573,7 @@ export default function AIPrompt(props: {
       console.error('Error analyzing resource:', error);
       setIsStreaming(false);
       setStreamingContent('');
+      setStreamingReasoning('');
 
       // Don't add error to history if it was an abort error (user stopped the request)
       if (error.name !== 'AbortError') {
