@@ -191,6 +191,29 @@ const TextStreamContainer = React.memo(function TextStreamContainer({
     }
   }, [history, isNearBottom, scrollToBottom, scrollToShowNewMessage]);
 
+  // Auto-scroll during streaming when content updates
+  const lastMessageContent = history.length > 0 ? history[history.length - 1]?.content : '';
+  const lastMessageContentLength = lastMessageContent?.length || 0;
+
+  useEffect(() => {
+    if (isStreaming && containerRef.current) {
+      // Check isNearBottom inside the effect to get fresh value
+      const container = containerRef.current;
+      const threshold = 100;
+      const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      const nearBottom = distanceFromBottom <= threshold;
+
+      if (nearBottom) {
+        // Use requestAnimationFrame to scroll after render is complete
+        requestAnimationFrame(() => {
+          if (containerRef.current) {
+            containerRef.current.scrollTop = containerRef.current.scrollHeight;
+          }
+        });
+      }
+    }
+  }, [lastMessageContentLength, isStreaming]);
+
   // Auto-scroll only when loading starts (not when it finishes)
   useEffect(() => {
     if (isLoading && isNearBottom()) {
